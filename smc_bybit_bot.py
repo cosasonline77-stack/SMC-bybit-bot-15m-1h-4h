@@ -54,7 +54,7 @@ TF_CONFIG = {
         "tp_pct":           [33,  33,  34],
         "alert_cooldown_h": 4,
         "risk_pct":         1.0,
-        "max_leverage":     20,
+        "max_leverage":     25,
         "max_sl_pct":       3.0,
         "topic":            268,
         "label":            "15M",
@@ -67,7 +67,7 @@ TF_CONFIG = {
         "tp_pct":           [25,  35,  40],
         "alert_cooldown_h": 8,
         "risk_pct":         1.0,
-        "max_leverage":     20,
+        "max_leverage":     25,
         "max_sl_pct":       5.0,
         "topic":            395,
         "label":            "1H",
@@ -80,7 +80,7 @@ TF_CONFIG = {
         "tp_pct":           [25,  35,  40],
         "alert_cooldown_h": 24,
         "risk_pct":         1.0,
-        "max_leverage":     10,
+        "max_leverage":     25,
         "max_sl_pct":       8.0,
         "topic":            401,
         "label":            "4H",
@@ -106,7 +106,7 @@ class Signal:
     entry: float;   stop_loss: float
     tp1: float;     tp2: float;   tp3: float
     rr1: float;     rr2: float;   rr3: float
-    sl_pct: float;  leverage: int
+    sl_pct: float;  lev_low: int;  lev_high: int
     reason: str;    timeframe: str; timestamp: str
     funding_rate:         float = 0.0
     open_interest_change: str   = ""
@@ -183,16 +183,40 @@ def _pf(p):
     if p >= 1:    return f"{p:.4f}"
     return f"{p:.6f}"
 
-def calc_leverage(entry, sl, risk_pct, max_lev):
-    sl_pct = abs(entry - sl) / entry * 100
-    if sl_pct <= 0: return 1
-    return max(1, min(max_lev, int(risk_pct / sl_pct)))
+LEV_MIN = 3    # apalancamiento mínimo para trader retail
+LEV_MAX = 25   # apalancamiento máximo absoluto
 
-def lev_label(lev):
-    if lev >= 15: return "⚠️ Alto riesgo"
-    if lev >= 10: return "🟡 Moderado-alto"
-    if lev >= 5:  return "🟢 Moderado"
-    return "✅ Conservador"
+def calc_leverage_range(entry, sl, risk_pct, max_lev):
+    """
+    Devuelve (lev_min, lev_max) como rango recomendado.
+
+    lev_conservador = RISK% / SL%          → entrada conservadora
+    lev_agresivo    = lev_conservador * 2.5 → límite agresivo razonable
+
+    Ambos valores se clampean entre LEV_MIN y min(max_lev, LEV_MAX).
+    """
+    sl_pct = abs(entry - sl) / entry * 100
+    if sl_pct <= 0:
+        return (LEV_MIN, LEV_MIN)
+
+    techo       = min(max_lev, LEV_MAX)
+    lev_base    = risk_pct / sl_pct                          # ej: 1% / 0.5% = 2x
+    lev_low     = max(LEV_MIN, min(techo, int(lev_base)))    # mínimo siempre 3x
+    lev_high    = max(LEV_MIN, min(techo, int(lev_base * 2.5)))  # hasta 2.5x el base
+
+    # Asegurar que lev_high > lev_low para que el rango tenga sentido
+    if lev_high <= lev_low:
+        lev_high = min(techo, lev_low + 2)
+
+    return (lev_low, lev_high)
+
+
+def lev_label(lev_low, lev_high):
+    """Etiqueta de riesgo basada en el techo del rango."""
+    if lev_high >= 20: return "⚠️ Alto riesgo — gestión estricta"
+    if lev_high >= 15: return "🟡 Moderado-alto — SL obligatorio"
+    if lev_high >= 8:  return "🟢 Moderado — recomendado retail"
+    return "✅ Conservador — ideal para comenzar"
 
 
 def format_signal(s: Signal, cfg: dict) -> str:
@@ -219,8 +243,8 @@ def format_signal(s: Signal, cfg: dict) -> str:
         f"🎯 <b>TP2 {tp[1]}%:</b> <code>{_pf(s.tp2)}</code>  R/R <b>{s.rr2:.1f}x</b>\n"
         f"🎯 <b>TP3 {tp[2]}%:</b> <code>{_pf(s.tp3)}</code>  R/R <b>{s.rr3:.1f}x</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ <b>Apalancamiento rec.:</b> <code>{s.leverage}x</code>  {lev_label(s.leverage)}\n"
-        f"💡 <i>Con {s.leverage}x y {cfg['risk_pct']}% capital → TP1 duplica la posición</i>\n"
+        f"⚡ <b>Apalancamiento rec.:</b> <code>{s.lev_low}x – {s.lev_high}x</code>  {lev_label(s.lev_low, s.lev_high)}\n"
+        f"💡 <i>Conservador: {s.lev_low}x | Agresivo: {s.lev_high}x | Máx absoluto: {LEV_MAX}x</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{fl}{oi}"
         f"📋 <b>Confluencias:</b>\n{cf}\n"
@@ -383,13 +407,13 @@ class SMCAnalyzer:
             if rr1<cfg["rr_min"]: return None
             sl_pct=abs(entry-sl)/entry*100
             if sl_pct>cfg["max_sl_pct"]: return None
-            lev=calc_leverage(entry, sl, cfg["risk_pct"], cfg["max_leverage"])
+            lev_low, lev_high = calc_leverage_range(entry, sl, cfg["risk_pct"], cfg["max_leverage"])
             return Signal(
                 symbol=symbol, direction=direction,
                 entry=round(entry,8), stop_loss=round(sl,8),
                 tp1=round(tp1,8), tp2=round(tp2,8), tp3=round(tp3,8),
                 rr1=round(rr1,1), rr2=round(rr2,1), rr3=round(rr3,1),
-                sl_pct=round(sl_pct,2), leverage=lev,
+                sl_pct=round(sl_pct,2), lev_low=lev_low, lev_high=lev_high,
                 reason=" | ".join(reasons), timeframe=tf, timestamp=_now(),
                 funding_rate=ctx.funding_rate if ctx else 0.0,
                 open_interest_change=oi_txt,
@@ -463,7 +487,7 @@ class BybitSMCBot:
         if sig and not self.already_alerted(sig,cfg):
             ok=send_telegram(format_signal(sig,cfg), topic_id=cfg["topic"])
             log.info(f"{'OK' if ok else 'ERR'} [{tf}] {symbol} {sig.direction} | "
-                     f"{bias} | {sig.leverage}x | TP1 {sig.rr1}x")
+                     f"{bias} | Lev {sig.lev_low}x-{sig.lev_high}x | TP1 {sig.rr1}x")
 
     async def run_tf(self, tf):
         cfg=TF_CONFIG[tf]
