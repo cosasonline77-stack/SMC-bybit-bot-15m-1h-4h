@@ -1,0 +1,7 @@
+services:
+  - type: worker
+    name: smc-bybit-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python smc_bybit_bot.py
+    plan: free
